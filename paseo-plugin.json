@@ -1,0 +1,19 @@
+{
+  "id": "paseo-hermes-direct",
+  "requirements": {
+    "paseo": ">=0.11.0 <0.12.0"
+  },
+  "build": [
+    [
+      "npm",
+      "install",
+      "--include=dev",
+      "--legacy-peer-deps"
+    ],
+    [
+      "npm",
+      "run",
+      "build"
+    ]
+  ]
+}

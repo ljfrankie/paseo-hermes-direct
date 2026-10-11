@@ -1,0 +1,34 @@
+{
+  "name": "paseo-hermes-direct",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Native Hermes AIAgent streaming provider for Paseo",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "files": [
+    "index.server.ts",
+    "index.client.tsx",
+    "server",
+    "scripts/build.mjs",
+    "paseo-plugin.json",
+    "hermes.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts && python3 -m unittest discover -s tests -p 'test_*.py'",
+    "smoke": "node --import tsx scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.11.2",
+    "@getpaseo/protocol": "0.11.2",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "tsx": "^4.22.4",
+    "zod": "^4.4.3"
+  }
+}

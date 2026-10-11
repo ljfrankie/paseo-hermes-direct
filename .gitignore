@@ -1,0 +1,4 @@
+node_modules/
+server/generated-bridge.ts
+__pycache__/
+*.pyc
