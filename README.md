@@ -38,6 +38,7 @@ Most Hermes integrations go through ACP, a generic protocol every agent can spea
 - Hermes slash commands (`/model`, `/compress`, `/goal`, `/queue`, `/steer`, ...) appear in Paseo's `/` menu.
 - Images (PNG/JPEG/WebP/GIF, up to 20 MiB per message) ride along as native OpenAI-style `image_url` multimodal content.
 - Sessions persist as atomic snapshots and can be resumed.
+- The phone model selector uses `session.configure` to switch the live Hermes model without clearing history or creating a conversation turn.
 
 ## Versioning
 
@@ -65,6 +66,10 @@ Create a conversation with the **Hermes Direct** provider. Models and credential
   }
 }
 ```
+
+To change models in an open session, use Paseo's model selector or `/model <model>` (including `/model <provider:model>`). Switching is available while idle; wait for or stop the current turn first. Both paths use Hermes's native routing validation and model switch, preserve history, update Paseo's session configuration, and persist the selected model/provider. Clearing the selection restores the Hermes default model and its resolved provider. `session.configure` supports model changes only; nonempty mode/reasoning/settings changes are rejected before any switch.
+
+The catalog lists the Hermes default model plus the comma-separated IDs in `PASEO_HERMES_MODELS`. It does not fetch the provider's entire remote catalog. After updating this plugin, close/reopen the session or create a new one so Paseo negotiates the new `session.configure` capability.
 
 Existing Hermes CLI sessions are not imported; start a new conversation. Persistent sessions recover through snapshots stored at `$HERMES_HOME/paseo-direct/<uuid>.json` (written 0600).
 

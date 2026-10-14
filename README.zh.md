@@ -142,7 +142,7 @@ paseo provider models hermes-direct
 | Slash 命令与 `/` 菜单 | 已实现，见下方命令表 |
 | 原生 steer、文字队列、持续目标 | 已实现，见下方命令表 |
 | 非图片附件 | 暂不支持 |
-| 当前会话模型切换 | 通过 `/model` 实现，保留模型历史并更新 Paseo 配置 |
+| 当前会话模型切换 | 手机模型选择器（`session.configure`）和 `/model` 均已实现；保留历史并更新 Paseo 配置 |
 | 原生 CLI 历史导入、plan mode | 暂不支持 |
 | clarify 问答卡片、文件差异专项审批 | 暂未适配，不宣称与 CLI 交互完全等价 |
 
@@ -196,6 +196,8 @@ npm run smoke -- --command context
 npm run smoke -- --command model
 ```
 
+手机端可在空闲会话使用模型选择器切换：插件协商 `session.configure` 能力，并复用 `/model` 的 Hermes 原生模型路由与切换接口。成功后先更新 `session.config`，再完成配置请求；不会新增用户/助手消息或对话回合，历史和图片上下文保留。模型/原生 provider 随持久快照恢复；清除选择（model 为 null）或选择 `default` 时回到 Hermes 默认模型及其解析出的 provider。正在执行或切换模型时拒绝新的切换和普通 prompt；不支持的 mode、thinkingOption、settings 非空配置整体拒绝，不会先改模型再报错。更新插件后关闭并恢复原会话，或新建会话，以重新协商能力。
+
 模型列表来自 Hermes 默认模型；额外候选可通过 `PASEO_HERMES_MODELS` 配置为逗号分隔列表。它只是候选名称列表，不负责创建模型服务或验证可用性。`PASEO_HERMES_MODEL` 可覆盖默认模型。
 
 图片会转换为 Hermes 原生的 OpenAI 风格 `image_url` 多模态内容，顺序与发送时一致。上传文件会读入图片字节，恢复后的上下文不依赖临时路径。单次消息的图片合计上限为 **20 MiB**（解码后的大小）。会校验 base64、MIME 与文件头，错误会明确返回。GIF 是否按静态图处理取决于模型服务。
@@ -228,7 +230,7 @@ npm run typecheck
 npm test
 ```
 
-35 项 Node 测试覆盖目标继续/完成/预算/阻塞、暂停防止过期续轮、subgoal 恢复、wait/unwait、steer 注入和原生投递、队列 FIFO 和暂停恢复，以及 slash 菜单、结构化命令和文字命令、命令能力协商、查询命令不调用模型、重置及模型切换后的恢复、压缩预览/失败恢复、命令并发防护、stop，以及图片纯输入、多图和文字顺序、图片文件内联、格式与大小拒绝、图片历史恢复、能力协商、实时文本到达、推理和工具事件、最终答案去重、多轮恢复、busy、中断、审批拒绝与解除、错误恢复、配置/附件拒绝、跨进程锁以及 provider status/catalog。每个输出事件均通过 Paseo SDK `ProviderEventSchema` 验证。
+40 项 Node 测试覆盖手机模型切换协议、切换后的历史及恢复、默认模型重置、路由/原生切换失败恢复、切换并发防护、能力协商，以及目标继续/完成/预算/阻塞、暂停防止过期续轮、subgoal 恢复、wait/unwait、steer 注入和原生投递、队列 FIFO 和暂停恢复，以及 slash 菜单、结构化命令和文字命令、命令能力协商、查询命令不调用模型、重置及模型切换后的恢复、压缩预览/失败恢复、命令并发防护、stop，以及图片纯输入、多图和文字顺序、图片文件内联、格式与大小拒绝、图片历史恢复、能力协商、实时文本到达、推理和工具事件、最终答案去重、多轮恢复、busy、中断、审批拒绝与解除、错误恢复、配置/附件拒绝、跨进程锁以及 provider status/catalog。每个输出事件均通过 Paseo SDK `ProviderEventSchema` 验证。
 
 架构参考：<https://github.com/Jecvay/paseo-dsh-direct>。本项目没有复制该项目的实现；直接使用 Paseo 公开 Provider SDK 和 Hermes 原生 AIAgent 回调。
 

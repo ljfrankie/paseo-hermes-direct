@@ -63,6 +63,7 @@ class Bridge:
         self.session_id = None
         self.model = None
         self.busy = False
+        self.configuring = False
         self.session_lock = None
         self.requested_provider = None
         self.scheduler_lock = threading.RLock()
@@ -416,7 +417,7 @@ class Bridge:
 
     def drain(self):
         # Caller owns scheduler_lock. Every continuation is a normal serial native turn.
-        if self.busy or self.queue_paused or self.closing or self.halted.is_set() or self.control_pending:
+        if self.busy or self.configuring or self.queue_paused or self.closing or self.halted.is_set() or self.control_pending:
             return
         if self.jobs:
             job = self.jobs.pop(0)
@@ -446,6 +447,56 @@ class Bridge:
             except queue.Empty:
                 continue
             work()
+
+    def configure(self, msg):
+        # Reserve the same execution lane used by normal and automatically queued turns.
+        # Fail only this request on an admission race; do not fail an unrelated active turn.
+        with self.scheduler_lock:
+            if not self.agent or self.closing or self.busy or self.configuring:
+                emit("configure_result", requestId=msg["requestId"], ok=False,
+                     error="Hermes session is busy or not ready")
+                return
+            self.configuring = True
+            self.control_pending += 1
+
+        def work():
+            tokens = None
+            try:
+                from gateway.session_context import set_session_vars, clear_session_vars
+                from agent.runtime_cwd import set_session_cwd
+                tokens = set_session_vars(session_key=self.session_id, session_id=self.session_id, cwd=self.cwd, cron_session="")
+                set_session_cwd(self.cwd)
+                with self.scheduler_lock:
+                    if self.closing:
+                        raise RuntimeError("Session is closing")
+                    model = msg.get("model")
+                    if model is None or model == "default":
+                        cfg, model, _ = config_catalog()
+                        if not model:
+                            raise ValueError("No Hermes default model configured")
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+                        mc = cfg.get("model") or {}
+                        runtime = resolve_runtime_provider(requested=mc.get("provider") if isinstance(mc, dict) else None,
+                                                           target_model=model)
+                        if runtime.get("provider"):
+                            model = str(runtime["provider"]) + ":" + model
+                    if not isinstance(model, str) or not model.strip():
+                        raise ValueError("Model ID cannot be empty")
+                    # Share the native validation/switch/save/config-event path with /model.
+                    # This is a configuration RPC, so it adds no turn or timeline messages.
+                    self.execute_command("model", model.strip(), msg["requestId"])
+                emit("configure_result", requestId=msg["requestId"], ok=True)
+            except Exception as exc:
+                emit("configure_result", requestId=msg["requestId"], ok=False, error=str(exc))
+            finally:
+                if tokens is not None:
+                    clear_session_vars(tokens)
+                with self.scheduler_lock:
+                    self.configuring = False
+                    self.control_pending -= 1
+                    self.drain()
+
+        self.controls.put(work)
 
     def control(self, msg):
         command = msg["command"]
@@ -596,7 +647,7 @@ class Bridge:
     def _prompt(self, msg):
         if not self.agent:
             raise RuntimeError("Session not open")
-        if self.busy:
+        if self.busy or self.configuring:
             raise RuntimeError("A foreground turn is already active")
         self.busy = True
         self.in_model = not bool(msg.get("command"))
@@ -677,6 +728,8 @@ def main():
                 bridge.prompt(msg)
             elif kind == "control":
                 bridge.control(msg)
+            elif kind == "configure":
+                bridge.configure(msg)
             elif kind == "permission":
                 bridge.permission(msg)
             elif kind == "interrupt":

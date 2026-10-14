@@ -2,18 +2,19 @@ import time
 from tools import terminal_tool
 class AIAgent:
     def __init__(self, stream_delta_callback=None, reasoning_callback=None, tool_start_callback=None,
-                 tool_complete_callback=None, cwd=None, session_db=None, model=None, **kwargs):
+                 tool_complete_callback=None, cwd=None, session_db=None, model=None, provider=None, session_id=None, **kwargs):
         self.delta, self.reason, self.start, self.complete = stream_delta_callback, reasoning_callback, tool_start_callback, tool_complete_callback
         self.stopped = False
         self.pending_steer = []
         self.model = model
-        self.provider = kwargs.get('provider','fixture')
+        self.provider = provider or 'fixture'
         self._session_db = session_db
-        self.session_id = kwargs.get('session_id','fixture')
+        self.session_id = session_id or 'fixture'
         self.tools = [{'type':'function','function':{'name':'terminal','description':'fixture terminal'}}]
     def reset_session_state(self, previous_messages=None, old_session_id=None, carry_over_context=False):
         self.stopped = False
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None):
+        if new_model == 'native-failure': raise RuntimeError('fixture native client rebuild failed')
         self.model, self.provider = new_model, new_provider
     def steer(self, text):
         self.pending_steer.append(text)

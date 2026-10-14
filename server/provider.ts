@@ -7,7 +7,7 @@ import { launchBridge, type BridgeClient, type WireEvent } from "./bridge-client
 import { parseSlash } from "./slash-commands.js";
 import { preparePrompt } from "./prompt-content.js";
 
-const SUPPORTED = ["prompt.message", "prompt.steer", "prompt.image", "prompt.command", "session.persistence", "permission"] as const;
+const SUPPORTED = ["prompt.message", "prompt.steer", "prompt.image", "prompt.command", "session.configure", "session.persistence", "permission"] as const;
 export type BridgeFactory = (env: Record<string, string>, cwd?: string, command?: string, args?: readonly string[]) => BridgeClient;
 function environment(launch?: ProviderLaunch, session?: ProviderSessionConfig): Record<string, string> {
   return { ...(launch?.env ?? Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined))), ...session?.env };
@@ -36,7 +36,7 @@ export function createHermesProvider(factory: BridgeFactory = launchBridge): Pro
       const listeners = new Set<(e: ProviderEvent) => void>();
       const sessions = new Map<string, {
         bridge: BridgeClient; config: ProviderSessionConfig; nativeId: string;
-        active?: string; canceled: boolean; closing: boolean; opening: boolean; permissions: Set<string>; commands: Set<string>;
+        active?: string; configuring: boolean; canceled: boolean; closing: boolean; opening: boolean; permissions: Set<string>; commands: Set<string>;
       }>();
       const owned = new Set<BridgeClient>();
       let closed = false;
@@ -93,7 +93,7 @@ export function createHermesProvider(factory: BridgeFactory = launchBridge): Pro
                 if ([...sessions.values()].some(s => s.nativeId === nativeId)) throw new Error("This native session is already open in this connection");
                 const bridge = startBridge(c);
                 const state = { bridge, config: c, nativeId, active: undefined as string | undefined,
-                  canceled: false, closing: false, opening: true, permissions: new Set<string>(), commands: new Set<string>() };
+                  configuring: false, canceled: false, closing: false, opening: true, permissions: new Set<string>(), commands: new Set<string>() };
                 sessions.set(input.sessionId, state);
                 const sessionId = input.sessionId;
                 bridge.onExit(error => {
@@ -169,8 +169,33 @@ export function createHermesProvider(factory: BridgeFactory = launchBridge): Pro
                 }
                 return;
               }
+              case "session.configure": {
+                const state = session(input.sessionId);
+                const changes = input.changes;
+                // Validate the entire request before changing anything. Null/empty values
+                // for unavailable options are harmless clears, not mode/reasoning support.
+                if (changes.mode != null || changes.thinkingOption != null || Object.keys(changes.settings ?? {}).length)
+                  throw new Error("Hermes Direct session.configure supports model changes only; configure modes/reasoning in Hermes config.yaml");
+                if (state.active || state.configuring) throw new Error("Hermes is busy; wait or stop the active turn before changing models");
+                if (changes.model === undefined) {
+                  emit({ type: "request.completed", requestId: input.requestId });
+                  return;
+                }
+                if (changes.model !== null && !changes.model.trim()) throw new Error("Model ID cannot be empty");
+                state.configuring = true;
+                try {
+                  const done = state.bridge.waitFor("configure_result", 180_000, input.requestId);
+                  const [result] = await Promise.all([done, Promise.resolve().then(() => state.bridge.send({
+                    type: "configure", requestId: input.requestId, model: changes.model,
+                  }))]);
+                  if (!result.ok) throw new Error(result.error || "Hermes model switch failed");
+                  emit({ type: "request.completed", requestId: input.requestId });
+                } finally { state.configuring = false; }
+                return;
+              }
               case "session.prompt": {
                 const state = session(input.sessionId);
+                if (state.configuring) throw new Error("Hermes is changing models; wait before sending another prompt");
                 const command = input.prompt.delivery === "steer" ? {
                   name: "steer", arguments: input.prompt.input.type === "message"
                     ? input.prompt.input.content.map(part => {
@@ -202,7 +227,7 @@ export function createHermesProvider(factory: BridgeFactory = launchBridge): Pro
                 const prepared = command ? { text: `/${command.name}${command.arguments ? " " + command.arguments : ""}`, content: "", imageCount: 0 }
                   : await preparePrompt(input.prompt.input.type === "message" ? input.prompt.input.content : []);
                 // Reading uploads is asynchronous; recheck admission after preparation.
-                if (closed || state.closing || state.active) throw new Error("Hermes is busy or the session has closed");
+                if (closed || state.closing || state.active || state.configuring) throw new Error("Hermes is busy or the session has closed");
                 if (prepared.imageCount && !capabilities.includes("prompt.image")) throw new Error("Image capability was not negotiated");
                 const turnId = randomUUID();
                 state.active = turnId; state.canceled = false;

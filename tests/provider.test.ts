@@ -8,7 +8,7 @@ import { createHermesProvider } from '../server/provider.js';
 import { ProviderEventSchema, type ProviderEvent, type ProviderConnection, type ProviderSessionConfig } from '@getpaseo/plugin/server/provider';
 
 const fixture = fileURLToPath(new URL('./fixtures/hermes', import.meta.url));
-const capabilities = ['prompt.message','prompt.image','prompt.command','session.persistence','permission'];
+const capabilities = ['prompt.message','prompt.image','prompt.command','session.configure','session.persistence','permission'];
 const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function wait(events: ProviderEvent[], predicate: (e: ProviderEvent) => boolean, timeout = 5000) {
   const start = Date.now();
@@ -501,4 +501,96 @@ test('concurrent queue admissions preserve FIFO; clear removes only pending work
     await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');await delay(80);
     assert.equal(h.events.filter(e=>e.type==='session.turn' && e.state==='started').length,1);
   }finally{await h.close();}
+});
+
+test('session.configure switches the native model without a turn, preserves history and restores the switched model',async()=>{
+  const h=await harness();
+  try{
+    await h.open();assert.ok(h.connection.capabilities.includes('session.configure'));
+    const opened=h.events.find(e=>e.type==='session.opened');if(opened?.type!=='session.opened')throw Error();
+    await h.prompt('before');await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');h.events.length=0;
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'switch',changes:{model:'other:gui-model'}});
+    const cfg=h.events.find(e=>e.type==='session.config');assert.ok(cfg?.type==='session.config' && cfg.config.model==='gui-model');
+    assert.ok(h.events.some(e=>e.type==='request.completed' && e.requestId==='switch'));
+    assert.ok(!h.events.some(e=>e.type==='session.turn' || e.type==='timeline.item'));
+    assert.ok(h.events.indexOf(cfg!)<h.events.findIndex(e=>e.type==='request.completed'));
+    await h.prompt('after','s1','after');await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');
+    assert.ok(h.events.some(e=>e.type==='timeline.item' && e.item.type==='assistant_message' && e.item.text==='hello stream 3'));
+    await h.connection.send({type:'session.close',sessionId:'s1',requestId:'close'});h.events.length=0;await h.open('s2',opened.persistence);
+    assert.ok(h.events.some(e=>e.type==='session.config' && e.config.model==='gui-model'));
+    await h.prompt('/model','s2','view');await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');
+    assert.ok(h.events.some(e=>e.type==='timeline.item' && e.item.type==='assistant_message' && e.item.text.includes('Provider：other')));
+  }finally{await h.close();}
+});
+
+test('configure route validation/client rebuild failures preserve the old model and keep the session usable',async()=>{
+  const h=await harness();
+  try{
+    await h.open();h.events.length=0;
+    for(const model of ['invalid','native-failure']){
+      await h.connection.send({type:'session.configure',sessionId:'s1',requestId:model,changes:{model}});
+      assert.ok(h.events.some(e=>e.type==='request.failed' && e.requestId===model));
+      assert.ok(!h.events.some(e=>e.type==='session.config' || e.type==='session.runtime_failed' || e.type==='session.turn'));
+    }
+    await h.prompt('/model','s1','unchanged');await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');
+    assert.ok(h.events.some(e=>e.type==='timeline.item' && e.item.type==='assistant_message' && e.item.text.includes('fixture-model')));
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'retry',changes:{model:'recovered-model'}});
+    assert.ok(h.events.some(e=>e.type==='request.completed' && e.requestId==='retry'));
+  }finally{await h.close();}
+});
+
+test('configure rejects busy turns and concurrent switches; prompts cannot enter the switching lane',async()=>{
+  const h=await harness();
+  try{
+    await h.open();await h.prompt('slow');
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'busy',changes:{model:'wrong-model'}});
+    assert.ok(h.events.some(e=>e.type==='request.failed' && e.requestId==='busy'));
+    await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');h.events.length=0;
+    const changing=h.connection.send({type:'session.configure',sessionId:'s1',requestId:'switching',changes:{model:'slow-model'}});
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'overlap',changes:{model:'wrong-model'}});
+    await h.prompt('overlap','s1','overlap-prompt');
+    assert.ok(h.events.some(e=>e.type==='request.failed' && e.requestId==='overlap'));
+    assert.ok(h.events.some(e=>e.type==='session.prompt_result' && e.clientMessageId==='overlap-prompt' && e.result.type==='failed'));
+    await changing;assert.ok(h.events.some(e=>e.type==='session.config' && e.config.model==='slow-model'));
+    assert.ok(!h.events.some(e=>e.type==='session.turn'));
+    await h.prompt('next','s1','next');await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');
+  }finally{await h.close();}
+});
+
+test('configure validates all fields before mutation and supports explicit default-model reset and no-op clears',async()=>{
+  const h=await harness();
+  try{
+    await h.open();h.events.length=0;
+    for(const changes of [{model:'wrong',mode:'plan'},{model:'wrong',thinkingOption:'high'},{model:'wrong',settings:{x:1}},{model:' '}]){
+      await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'bad-'+h.events.length,changes});
+    }
+    assert.equal(h.events.filter(e=>e.type==='request.failed').length,4);
+    assert.ok(!h.events.some(e=>e.type==='session.config'));
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'empty',changes:{mode:null,thinkingOption:null,settings:{}}});
+    assert.ok(h.events.some(e=>e.type==='request.completed' && e.requestId==='empty'));
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'switch',changes:{model:'other:gui-model'}});
+    await h.connection.send({type:'session.configure',sessionId:'s1',requestId:'default',changes:{model:null}});
+    assert.ok(h.events.some(e=>e.type==='session.config' && e.config.model==='fixture-model'));
+    await h.prompt('/model','s1','view-default');await wait(h.events,e=>e.type==='session.turn' && e.state==='completed');
+    assert.ok(h.events.some(e=>e.type==='timeline.item' && e.item.type==='assistant_message' && e.item.text.includes('Provider：fixture')));
+  }finally{await h.close();}
+});
+
+test('configure requires its capability and works without command capability',async()=>{
+  const h=await harness();let c:ProviderConnection|undefined;
+  try{
+    c=await h.provider.connect({...h.request,capabilities:['prompt.message','session.persistence']});
+    const events:ProviderEvent[]=[];c.onEvent(e=>{ProviderEventSchema.parse(e);events.push(e);});
+    await c.send({type:'session.open',sessionId:'limited',requestId:'open',config:h.config,history:'skip'});
+    await c.send({type:'session.configure',sessionId:'limited',requestId:'absent',changes:{model:'x'}});
+    assert.ok(events.some(e=>e.type==='request.failed' && e.requestId==='absent'));
+    await c.close();events.length=0;
+    c=await h.provider.connect({...h.request,capabilities:['prompt.message','session.configure','session.persistence']});
+    c.onEvent(e=>{ProviderEventSchema.parse(e);events.push(e);});
+    await c.send({type:'session.open',sessionId:'gui',requestId:'open',config:h.config,history:'skip'});
+    await c.send({type:'session.configure',sessionId:'gui',requestId:'gui-switch',changes:{model:'gui-only'}});
+    assert.ok(events.some(e=>e.type==='request.completed' && e.requestId==='gui-switch'));
+    assert.ok(events.some(e=>e.type==='session.config' && e.config.model==='gui-only'));
+    assert.ok(!events.some(e=>e.type==='session.turn' || e.type==='session.commands'));
+  }finally{await c?.close();await h.close();}
 });
